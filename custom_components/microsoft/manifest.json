@@ -1,0 +1,14 @@
+{
+  "domain": "microsoft",
+  "name": "Microsoft Text-to-Speech (TTS)",
+  "codeowners": ["@pajeronda"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/microsoft",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "loggers": ["custom_components.microsoft"],
+  "quality_scale": "custom",
+  "requirements": [],
+  "homeassistant": "2023.10.0",
+  "version": "1.0.0"
+}
