@@ -11,6 +11,7 @@ CONF_OUTPUT_FORMAT = "output_format"
 
 DEFAULT_REGION = "eastus"
 DEFAULT_OUTPUT_FORMAT = "audio-24khz-96kbitrate-mono-mp3"
+VOICES_CACHE_TTL = 86400  # 24 hours in seconds
 
 # Options
 CONF_RATE = "rate"

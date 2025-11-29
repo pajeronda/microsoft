@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -28,6 +29,7 @@ from .const import (
     CONF_STYLE,
     CONF_STYLE_DEGREE,
     CONF_ROLE,
+    VOICES_CACHE_TTL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,8 +45,12 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 async def get_voices(hass: HomeAssistant, key: str, region: str) -> list[dict]:
     """Fetch voices from Azure."""
     # Check cache first
-    if cached := hass.data.get(DOMAIN, {}).get("voices"):
-        return cached
+    cache_data = hass.data.get(DOMAIN, {}).get("voices_cache")
+    if cache_data:
+        cached_voices, cached_time = cache_data
+        if time.time() - cached_time < VOICES_CACHE_TTL:
+            _LOGGER.debug("Using cached voices (age: %.0fs)", time.time() - cached_time)
+            return cached_voices
 
     session = async_get_clientsession(hass)
     url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
@@ -54,11 +60,12 @@ async def get_voices(hass: HomeAssistant, key: str, region: str) -> list[dict]:
         async with session.get(url, headers=headers) as response:
             if response.status == 200:
                 voices = await response.json()
-                # Cache the result
-                hass.data.setdefault(DOMAIN, {})["voices"] = voices
+                # Cache the result with timestamp
+                hass.data.setdefault(DOMAIN, {})["voices_cache"] = (voices, time.time())
+                _LOGGER.debug("Fetched and cached %d voices", len(voices))
                 return voices
-    except Exception:
-        pass
+    except Exception as ex:
+        _LOGGER.error("Error fetching voices: %s", ex)
     return []
 
 
@@ -156,49 +163,59 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow."""
 
+    def __init__(self) -> None:
+        """Initialize options flow."""
+        self._data = {}
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage the options."""
+        """Manage the options - Language selection."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            self._data.update(user_input)
+            return await self.async_step_voice()
 
-        # Re-fetch voices to populate dropdown
-        key = self.config_entry.data[CONF_API_KEY]
-        region = self.config_entry.data[CONF_REGION]
-
-        # Get current Language and Voice
+        # Get current Language
         current_lang = self.config_entry.options.get(
             CONF_LANGUAGE, self.config_entry.data.get(CONF_LANGUAGE)
         )
-        current_voice = self.config_entry.options.get(
-            CONF_VOICE, self.config_entry.data.get(CONF_VOICE)
-        )
 
+        # Re-fetch voices to get available languages
+        key = self.config_entry.data[CONF_API_KEY]
+        region = self.config_entry.data[CONF_REGION]
         voices = await get_voices(self.hass, key, region)
 
         # Get all languages for the language selector
         languages = sorted(list({v["Locale"] for v in voices}))
         if current_lang not in languages and languages:
-            # Fallback if current lang not found
             current_lang = languages[0]
 
-        # Filter voices for the CURRENT language
-        # Note: If user changes language in UI, they might need to save and re-open
-        # to see voices for the new language, but we keep it single-step as requested.
-        voices_list = {
-            v["ShortName"]: f"{v['LocalName']} ({v['Gender']})"
-            for v in voices
-            if v["Locale"] == current_lang
-        }
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_LANGUAGE, default=current_lang): vol.In(
+                        languages
+                    ),
+                }
+            ),
+        )
 
-        # Ensure current voice is in the list (or handle mismatch if lang changed externally)
-        if current_voice not in voices_list:
-            # If the voice doesn't match the language, we still default to it
-            # to avoid validation errors, or we could pick the first one.
-            # But usually we just let it be, and the user will pick a new one or save.
-            pass
+    async def async_step_voice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step to select voice and other options based on chosen language."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return self.async_create_entry(title="", data=self._data)
 
+        # Get the language selected in previous step
+        selected_lang = self._data.get(CONF_LANGUAGE)
+
+        # Get current values
+        current_voice = self.config_entry.options.get(
+            CONF_VOICE, self.config_entry.data.get(CONF_VOICE)
+        )
         current_rate = self.config_entry.options.get(CONF_RATE, "0%")
         current_pitch = self.config_entry.options.get(CONF_PITCH, "default")
         current_volume = self.config_entry.options.get(CONF_VOLUME, "default")
@@ -209,14 +226,27 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             CONF_OUTPUT_FORMAT, DEFAULT_OUTPUT_FORMAT
         )
 
+        # Re-fetch voices
+        key = self.config_entry.data[CONF_API_KEY]
+        region = self.config_entry.data[CONF_REGION]
+        voices = await get_voices(self.hass, key, region)
+
+        # Filter voices for the SELECTED language
+        voices_list = {
+            v["ShortName"]: f"{v['LocalName']} ({v['Gender']})"
+            for v in voices
+            if v["Locale"] == selected_lang
+        }
+
+        # If current voice is not compatible with new language, pick first
+        if current_voice not in voices_list and voices_list:
+            current_voice = list(voices_list.keys())[0]
+
         return self.async_show_form(
-            step_id="init",
+            step_id="voice",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_LANGUAGE, default=current_lang): vol.In(
-                        languages
-                    ),
-                    vol.Optional(CONF_VOICE, default=current_voice): vol.In(
+                    vol.Required(CONF_VOICE, default=current_voice): vol.In(
                         voices_list
                     ),
                     vol.Optional(CONF_RATE, default=current_rate): cv.string,

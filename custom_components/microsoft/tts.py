@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from typing import Any
 from xml.sax.saxutils import escape
@@ -36,6 +37,7 @@ from .const import (
     CONF_ROLE,
     DEFAULT_OUTPUT_FORMAT,
     DOMAIN,
+    VOICES_CACHE_TTL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -93,10 +95,13 @@ class AzureTTSEntity(TextToSpeechEntity):
     async def async_fetch_voices(self):
         """Fetch available voices from Azure."""
         # Check global cache first
-        if cached := self.hass.data.get(DOMAIN, {}).get("voices"):
-            self._voices_data = cached
-            _LOGGER.debug("Used cached voices")
-            return
+        cache_data = self.hass.data.get(DOMAIN, {}).get("voices_cache")
+        if cache_data:
+            cached_voices, cached_time = cache_data
+            if time.time() - cached_time < VOICES_CACHE_TTL:
+                self._voices_data = cached_voices
+                _LOGGER.debug("Used cached voices (age: %.0fs)", time.time() - cached_time)
+                return
 
         url = f"https://{self._region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
         headers = {"Ocp-Apim-Subscription-Key": self._apikey}
@@ -104,8 +109,8 @@ class AzureTTSEntity(TextToSpeechEntity):
             async with self._session.get(url, headers=headers) as response:
                 if response.status == 200:
                     self._voices_data = await response.json()
-                    # Update global cache
-                    self.hass.data.setdefault(DOMAIN, {})["voices"] = self._voices_data
+                    # Update global cache with timestamp
+                    self.hass.data.setdefault(DOMAIN, {})["voices_cache"] = (self._voices_data, time.time())
                     _LOGGER.debug(
                         "Fetched %d voices from Azure", len(self._voices_data)
                     )
@@ -261,6 +266,22 @@ class AzureTTSEntity(TextToSpeechEntity):
             else:
                 rate = f"{int(rate)}%"
 
+        # Validate pitch (Azure accepts: x-low, low, medium, high, x-high, default, or ±50%)
+        valid_pitch_names = {"x-low", "low", "medium", "high", "x-high", "default"}
+        if isinstance(pitch, str) and pitch.lower() not in valid_pitch_names:
+            # Check if it's a percentage format
+            if not (pitch.endswith("%") or pitch.endswith("Hz")):
+                pitch = "default"
+
+        # Validate style_degree (Azure accepts 0.01-2.0)
+        if style_degree:
+            try:
+                degree_val = float(style_degree)
+                if not (0.01 <= degree_val <= 2.0):
+                    style_degree = "1"
+            except (ValueError, TypeError):
+                style_degree = "1"
+
         # Construct SSML with namespace for mstts
         xml_doc = (
             f"<speak version='1.0' xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='{lang_to_use}'>"
@@ -312,84 +333,6 @@ class AzureTTSEntity(TextToSpeechEntity):
 
         except aiohttp.ClientError as ex:
             _LOGGER.error("Error occurred for Microsoft Azure TTS: %s", ex)
-            return None, None
-
-        return "mp3", data
-        """Load TTS from Azure."""
-        if options is None:
-            options = {}
-
-        # 1. Voice selection priority:
-        #    a) 'voice' option passed in service call (e.g. automations)
-        #    b) Default voice configured in Options/Config Flow
-        voice = options.get(ATTR_VOICE, self._default_voice)
-
-        # 2. Handle language mismatch fallback
-        #    If automation asks for 'it-IT' but default is 'en-US', verify voice compatibility
-        if self._voices_data and language:
-            # Check if selected 'voice' supports the requested 'language'
-            # This is expensive to check every time, but safer.
-            # Simplified: if language changed and voice wasn't explicit, try to find a match.
-            if language != self._language and ATTR_VOICE not in options:
-                fallback_found = False
-                for v in self._voices_data:
-                    if v["Locale"].lower() == language.lower():
-                        if v["Gender"] == "Female":
-                            voice = v["ShortName"]
-                            fallback_found = True
-                            break
-                        if not fallback_found:
-                            voice = v["ShortName"]  # Take any if no female found yet
-                            fallback_found = True
-
-        # 3. Options
-        rate = options.get(CONF_RATE, self._config_entry.options.get(CONF_RATE, "0%"))
-        pitch = options.get(CONF_PITCH, "default")
-
-        # Smart Rate Handling (0.87 -> -13%)
-        if isinstance(rate, (int, float)):
-            rate_val = float(rate)
-            if 0.1 <= abs(rate_val) <= 3.0 and isinstance(rate, float):
-                percent = int((rate_val - 1.0) * 100)
-                rate = f"{'+' if percent >= 0 else ''}{percent}%"
-            else:
-                rate = f"{int(rate)}%"
-
-        # SSML
-        lang = language or self._language
-
-        xml_doc = (
-            f"<speak version='1.0' xml:lang='{lang}'>"
-            f"<voice xml:lang='{lang}' name='{voice}'>"
-            f"<prosody rate='{rate}' pitch='{pitch}'>"
-            f"{escape(message)}"
-            f"</prosody></voice></speak>"
-        )
-
-        headers = {
-            "Ocp-Apim-Subscription-Key": self._apikey,
-            "Content-Type": "application/ssml+xml",
-            "X-Microsoft-OutputFormat": self._output_format,
-            "User-Agent": "HomeAssistant-NeuralAzureTTS",
-        }
-
-        url = f"https://{self._region}.tts.speech.microsoft.com/cognitiveservices/v1"
-
-        try:
-            async with self._session.post(
-                url, headers=headers, data=xml_doc.encode("utf-8")
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    _LOGGER.error(
-                        "Error %d from Azure TTS: %s", response.status, error_text
-                    )
-                    return None, None
-
-                data = await response.read()
-
-        except aiohttp.ClientError as ex:
-            _LOGGER.error("Error occurred for Neural Azure TTS: %s", ex)
             return None, None
 
         return "mp3", data
