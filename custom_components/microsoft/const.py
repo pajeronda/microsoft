@@ -20,3 +20,60 @@ CONF_VOLUME = "volume"
 CONF_STYLE = "style"
 CONF_STYLE_DEGREE = "styledegree"
 CONF_ROLE = "role"
+
+# Azure API endpoints
+AZURE_TTS_BASE_URL = "https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+AZURE_VOICES_LIST_URL = (
+    "https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
+)
+AZURE_PORTAL_URL = "https://portal.azure.com"
+
+# SSML
+SSML_NAMESPACE = "https://www.w3.org/2001/mstts"
+
+# Audio streaming
+AUDIO_CHUNK_SIZE = 8192
+
+# Available Azure Speech Service regions
+# Reference: https://learn.microsoft.com/en-us/azure/ai-services/speech-service/regions
+AZURE_SPEECH_REGIONS = [
+    "australiaeast",
+    "brazilsouth",
+    "canadacentral",
+    "canadaeast",
+    "centralus",
+    "centralindia",
+    "eastasia",
+    "eastus",
+    "eastus2",
+    "francecentral",
+    "germanywestcentral",
+    "italynorth",
+    "japaneast",
+    "japanwest",
+    "koreacentral",
+    "northcentralus",
+    "northeurope",
+    "norwayeast",
+    "qatarcentral",
+    "southafricanorth",
+    "southcentralus",
+    "southeastasia",
+    "swedencentral",
+    "switzerlandnorth",
+    "switzerlandwest",
+    "uaenorth",
+    "uksouth",
+    "ukwest",
+    "usgovarizona",
+    "usgovvirginia",
+    "westcentralus",
+    "westeurope",
+    "westus",
+    "westus2",
+    "westus3",
+]
+
+# Config field names
+CONF_REGION_DROPDOWN = "region_dropdown"
+CONF_REGION_CUSTOM = "region_custom"

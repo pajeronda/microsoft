@@ -10,7 +10,6 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 import aiohttp
-import voluptuous as vol
 
 from homeassistant.components.tts import (
     ATTR_VOICE,
@@ -41,6 +40,11 @@ from .const import (
     DEFAULT_OUTPUT_FORMAT,
     DOMAIN,
     VOICES_CACHE_TTL,
+    AZURE_TTS_BASE_URL,
+    AZURE_VOICES_LIST_URL,
+    AZURE_PORTAL_URL,
+    SSML_NAMESPACE,
+    AUDIO_CHUNK_SIZE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,9 +59,6 @@ SENTENCE_ENDINGS = re.compile(
     r"(?:[\s\u3000]+|(?=[\u3000-\u303F\u4E00-\u9FFF\uAC00-\uD7AF])|$)"
     # Followed by: space(s) OR CJK character OR end of string
 )
-
-# Audio chunk size for streaming responses (8KB)
-AUDIO_CHUNK_SIZE = 8192
 
 
 async def async_setup_entry(
@@ -106,7 +107,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             manufacturer="Microsoft",
             model="Cognitive Services",
             entry_type=DeviceEntryType.SERVICE,
-            configuration_url="https://portal.azure.com",
+            configuration_url=AZURE_PORTAL_URL,
         )
 
     async def async_fetch_voices(self):
@@ -122,7 +123,7 @@ class AzureTTSEntity(TextToSpeechEntity):
                 )
                 return
 
-        url = f"https://{self._region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
+        url = AZURE_VOICES_LIST_URL.format(region=self._region)
         headers = {"Ocp-Apim-Subscription-Key": self._apikey}
         try:
             async with self._session.get(url, headers=headers) as response:
@@ -305,7 +306,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             Complete SSML document as string
         """
         xml_doc = (
-            f"<speak version='1.0' xmlns:mstts='https://www.w3.org/2001/mstts' "
+            f"<speak version='1.0' xmlns:mstts='{SSML_NAMESPACE}' "
             f"xml:lang='{language}'>"
             f"<voice xml:lang='{language}' name='{voice}'>"
         )
@@ -385,7 +386,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             "User-Agent": "HomeAssistant-MicrosoftAzureTTS",
         }
 
-        url = f"https://{self._region}.tts.speech.microsoft.com/cognitiveservices/v1"
+        url = AZURE_TTS_BASE_URL.format(region=self._region)
 
         try:
             async with self._session.post(
@@ -438,7 +439,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             "User-Agent": "HomeAssistant-MicrosoftAzureTTS",
         }
 
-        url = f"https://{self._region}.tts.speech.microsoft.com/cognitiveservices/v1"
+        url = AZURE_TTS_BASE_URL.format(region=self._region)
 
         async def data_gen() -> AsyncGenerator[bytes]:
             """Generate audio chunks sentence-by-sentence."""

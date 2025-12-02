@@ -1,0 +1,15 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "region_dropdown": "Region (select from list)",
+          "region_custom": "Custom Region (or enter manually)"
+        }
+      }
+    },
+    "error": {
+      "region_required": "Please select a region from the dropdown or enter a custom region."
+    }
+  }
+}

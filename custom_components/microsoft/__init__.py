@@ -2,22 +2,9 @@
 
 from __future__ import annotations
 
-import logging
-from xml.sax.saxutils import escape
-
-import aiohttp
-import voluptuous as vol
-
-from homeassistant.components.tts import (
-    TextToSpeechEntity,
-    TtsAudioType,
-    Voice,
-)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY, CONF_LANGUAGE, Platform
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 

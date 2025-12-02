@@ -6,7 +6,6 @@ import logging
 import time
 from typing import Any
 
-import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -20,7 +19,6 @@ from .const import (
     CONF_REGION,
     CONF_VOICE,
     CONF_OUTPUT_FORMAT,
-    DEFAULT_REGION,
     DEFAULT_OUTPUT_FORMAT,
     DOMAIN,
     CONF_RATE,
@@ -30,6 +28,10 @@ from .const import (
     CONF_STYLE_DEGREE,
     CONF_ROLE,
     VOICES_CACHE_TTL,
+    AZURE_VOICES_LIST_URL,
+    AZURE_SPEECH_REGIONS,
+    CONF_REGION_DROPDOWN,
+    CONF_REGION_CUSTOM,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,7 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_API_KEY): cv.string,
-        vol.Required(CONF_REGION, default=DEFAULT_REGION): cv.string,
+        vol.Optional(CONF_REGION_DROPDOWN, default=""): vol.In(
+            [""] + AZURE_SPEECH_REGIONS
+        ),
+        vol.Optional(CONF_REGION_CUSTOM, default=""): cv.string,
     }
 )
 
@@ -53,7 +58,7 @@ async def get_voices(hass: HomeAssistant, key: str, region: str) -> list[dict]:
             return cached_voices
 
     session = async_get_clientsession(hass)
-    url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
+    url = AZURE_VOICES_LIST_URL.format(region=region)
     headers = {"Ocp-Apim-Subscription-Key": key}
 
     try:
@@ -85,14 +90,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the initial step."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._voices = await get_voices(
-                self.hass, user_input[CONF_API_KEY], user_input[CONF_REGION]
-            )
-            if not self._voices:
-                errors["base"] = "cannot_connect"
+            # Hybrid region selection: dropdown OR custom text field
+            region_dropdown = user_input.get(CONF_REGION_DROPDOWN, "").strip()
+            region_custom = user_input.get(CONF_REGION_CUSTOM, "").strip()
+
+            # Priority: custom field > dropdown
+            final_region = region_custom if region_custom else region_dropdown
+
+            if not final_region:
+                errors["base"] = "region_required"
             else:
-                self._data.update(user_input)
-                return await self.async_step_language()
+                # Store the final region in CONF_REGION for backwards compatibility
+                user_input[CONF_REGION] = final_region
+
+                self._voices = await get_voices(
+                    self.hass, user_input[CONF_API_KEY], final_region
+                )
+                if not self._voices:
+                    errors["base"] = "cannot_connect"
+                else:
+                    self._data.update(user_input)
+                    return await self.async_step_language()
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
