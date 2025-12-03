@@ -72,27 +72,31 @@ def _get_file_extension_from_format(output_format: str) -> str:
     """
     # Map Azure format patterns to file extensions
     if "mp3" in output_format:
-        return "mp3"
+        extension = "mp3"
     elif "webm" in output_format:
-        return "webm"
+        extension = "webm"
     elif "ogg" in output_format or "opus" in output_format:
-        return "ogg"
+        extension = "ogg"
     elif "g722" in output_format:
-        return "g722"
+        extension = "g722"
     elif "amr" in output_format:
-        return "amr"
+        extension = "amr"
     elif "mulaw" in output_format:
-        return "ulaw"
+        extension = "ulaw"
     elif "alaw" in output_format:
-        return "alaw"
+        extension = "alaw"
     elif "pcm" in output_format or "raw" in output_format:
-        return "raw"
+        extension = "raw"
     elif "riff" in output_format:
-        return "wav"
+        extension = "wav"
     elif "flac" in output_format:
-        return "flac"
-    # Default fallback
-    return "mp3"
+        extension = "flac"
+    else:
+        # Default fallback
+        extension = "mp3"
+
+    _LOGGER.debug("Mapped output format '%s' to extension '%s'", output_format, extension)
+    return extension
 
 
 async def async_setup_entry(
@@ -128,6 +132,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             CONF_OUTPUT_FORMAT,
             config_entry.data.get(CONF_OUTPUT_FORMAT, DEFAULT_OUTPUT_FORMAT),
         )
+        _LOGGER.debug("Initialized TTS entity with output format: %s", self._output_format)
 
         self._session = async_get_clientsession(hass)
         self._voices_data = []
