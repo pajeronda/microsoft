@@ -77,3 +77,23 @@ AZURE_SPEECH_REGIONS = [
 # Config field names
 CONF_REGION_DROPDOWN = "region_dropdown"
 CONF_REGION_CUSTOM = "region_custom"
+
+# Audio Output Formats - Streaming only
+# Reference: https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech
+AUDIO_FORMATS = {
+    # Recommended - Best compatibility
+    "audio-24khz-96kbitrate-mono-mp3": "MP3 24kHz 96kbps (Recommended)",
+    "audio-48khz-192kbitrate-mono-mp3": "MP3 48kHz 192kbps (Recommended - HQ)",
+    "audio-24khz-48kbitrate-mono-mp3": "MP3 24kHz 48kbps (Recommended - Smaller)",
+    # Standard quality options
+    "audio-16khz-128kbitrate-mono-mp3": "MP3 16kHz 128kbps",
+    "audio-16khz-64kbitrate-mono-mp3": "MP3 16kHz 64kbps",
+    "ogg-24khz-16bit-mono-opus": "OGG Opus 24kHz",
+    "ogg-48khz-16bit-mono-opus": "OGG Opus 48kHz (High Quality)",
+    "webm-24khz-16bit-mono-opus": "WebM Opus 24kHz",
+    # VoIP / Telephony specialized
+    "raw-8khz-8bit-mono-mulaw": "µ-law 8kHz (VoIP/PBX)",
+    "raw-8khz-8bit-mono-alaw": "A-law 8kHz (VoIP/PBX)",
+    "g722-16khz-64kbps": "G.722 16kHz (VoIP/HD Voice)",
+    "amr-wb-16000hz": "AMR-WB 16kHz (Mobile)",
+}

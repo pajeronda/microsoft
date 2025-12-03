@@ -32,6 +32,7 @@ from .const import (
     AZURE_SPEECH_REGIONS,
     CONF_REGION_DROPDOWN,
     CONF_REGION_CUSTOM,
+    AUDIO_FORMATS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -275,7 +276,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_STYLE_DEGREE, default=current_style_degree
                     ): cv.string,
                     vol.Optional(CONF_ROLE, default=current_role): cv.string,
-                    vol.Optional(CONF_OUTPUT_FORMAT, default=current_format): cv.string,
+                    vol.Optional(CONF_OUTPUT_FORMAT, default=current_format): vol.In(
+                        AUDIO_FORMATS
+                    ),
                 }
             ),
         )

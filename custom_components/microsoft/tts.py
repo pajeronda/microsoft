@@ -61,6 +61,40 @@ SENTENCE_ENDINGS = re.compile(
 )
 
 
+def _get_file_extension_from_format(output_format: str) -> str:
+    """Extract the correct file extension from Azure output format.
+
+    Args:
+        output_format: Azure output format string (e.g., 'audio-24khz-96kbitrate-mono-mp3')
+
+    Returns:
+        File extension without dot (e.g., 'mp3', 'opus', 'wav', 'webm')
+    """
+    # Map Azure format patterns to file extensions
+    if "mp3" in output_format:
+        return "mp3"
+    elif "webm" in output_format:
+        return "webm"
+    elif "ogg" in output_format or "opus" in output_format:
+        return "ogg"
+    elif "g722" in output_format:
+        return "g722"
+    elif "amr" in output_format:
+        return "amr"
+    elif "mulaw" in output_format:
+        return "ulaw"
+    elif "alaw" in output_format:
+        return "alaw"
+    elif "pcm" in output_format or "raw" in output_format:
+        return "raw"
+    elif "riff" in output_format:
+        return "wav"
+    elif "flac" in output_format:
+        return "flac"
+    # Default fallback
+    return "mp3"
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -405,7 +439,8 @@ class AzureTTSEntity(TextToSpeechEntity):
             _LOGGER.error("Error occurred for Microsoft Azure TTS: %s", ex)
             return None, None
 
-        return "mp3", data
+        file_extension = _get_file_extension_from_format(self._output_format)
+        return file_extension, data
 
     async def async_stream_tts_audio(
         self, request: TTSAudioRequest
@@ -531,4 +566,5 @@ class AzureTTSEntity(TextToSpeechEntity):
                 _LOGGER.error("Unexpected error in streaming TTS: %s", ex)
                 raise
 
-        return TTSAudioResponse(extension="mp3", data_gen=data_gen())
+        file_extension = _get_file_extension_from_format(self._output_format)
+        return TTSAudioResponse(extension=file_extension, data_gen=data_gen())
