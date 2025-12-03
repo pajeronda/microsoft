@@ -3,7 +3,7 @@
 
 This custom component replaces the official Microsoft TTS integration for Home Assistant, which has not been updated or maintained for a long time and is now legacy.
 
-<img width="2286" height="888" alt="immagine" src="https://github.com/user-attachments/assets/b729f04c-c8f9-49b7-8fcc-711fd9be0972" />
+<img width="100%" height="auto" alt="immagine" src="https://github.com/user-attachments/assets/b729f04c-c8f9-49b7-8fcc-711fd9be0972" />
 
 
 ## Installation
