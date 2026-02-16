@@ -20,6 +20,8 @@ CONF_VOLUME = "volume"
 CONF_STYLE = "style"
 CONF_STYLE_DEGREE = "styledegree"
 CONF_ROLE = "role"
+CONF_ALLOW_RAW_SSML = "allow_raw_ssml"
+CONF_RAW_SSML = "raw_ssml"
 
 # Azure API endpoints
 AZURE_TTS_BASE_URL = "https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"

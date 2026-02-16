@@ -27,6 +27,7 @@ from .const import (
     CONF_STYLE,
     CONF_STYLE_DEGREE,
     CONF_ROLE,
+    CONF_ALLOW_RAW_SSML,
     VOICES_CACHE_TTL,
     AZURE_VOICES_LIST_URL,
     AZURE_SPEECH_REGIONS,
@@ -128,9 +129,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         languages = sorted(list({v["Locale"] for v in self._voices}))
         default_lang = "it-IT"
         # Try to find a smart default
-        for l in languages:
-            if l.startswith(self.hass.config.language):
-                default_lang = l
+        for lang in languages:
+            if lang.startswith(self.hass.config.language):
+                default_lang = lang
                 break
 
         return self.async_show_form(
@@ -148,11 +149,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step to select voice model."""
-        if user_input is not None:
+        if user_input is not None and CONF_VOICE in user_input:
             self._data.update(user_input)
             return self.async_create_entry(
                 title="Microsoft Text-to-Speech (TTS)", data=self._data
             )
+        if user_input is not None:
+            self._data.update(user_input)
 
         selected_lang = self._data[CONF_LANGUAGE]
         voices_list = {
@@ -224,9 +227,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step to select voice and other options based on chosen language."""
-        if user_input is not None:
+        if user_input is not None and CONF_VOICE in user_input:
             self._data.update(user_input)
             return self.async_create_entry(title="", data=self._data)
+        if user_input is not None:
+            self._data.update(user_input)
 
         # Get the language selected in previous step
         selected_lang = self._data.get(CONF_LANGUAGE)
@@ -243,6 +248,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current_role = self.config_entry.options.get(CONF_ROLE, "")
         current_format = self.config_entry.options.get(
             CONF_OUTPUT_FORMAT, DEFAULT_OUTPUT_FORMAT
+        )
+        current_allow_raw_ssml = self.config_entry.options.get(
+            CONF_ALLOW_RAW_SSML, False
         )
 
         # Re-fetch voices
@@ -279,6 +287,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Optional(CONF_OUTPUT_FORMAT, default=current_format): vol.In(
                         AUDIO_FORMATS
                     ),
+                    vol.Optional(
+                        CONF_ALLOW_RAW_SSML, default=current_allow_raw_ssml
+                    ): cv.boolean,
                 }
             ),
         )

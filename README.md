@@ -92,13 +92,12 @@ The streaming implementation uses the `async_stream_tts_audio` method introduced
 3. **Audio streaming**: Audio chunks are streamed to Home Assistant as they arrive from Azure
 4. **Immediate playback**: Home Assistant begins playback without waiting for the complete response
 
-**Note**: Streaming requires Home Assistant 2024.2+ and is automatically used when available. The integration gracefully falls back to non-streaming mode on older versions.
+**Note**: Streaming requires Home Assistant 2024.2+.
 
 ## Requirements
 
 - Home Assistant version 2024.2+ or higher
 - Azure Cognitive Services Speech API key
-- For streaming TTS: Home Assistant 2024.2+ recommended
 
 ## Credits
 
@@ -119,4 +118,3 @@ This project is released under the MIT License. See [LICENSE](LICENSE) for detai
 - **API Usage**: This integration requires an active Microsoft Azure account and a valid API key. Use of the Azure Cognitive Services API is subject to [Microsoft's terms of service](https://azure.microsoft.com/en-us/support/legal/).
 
 - **Trademarks**: Microsoft and related logos are registered trademarks of Microsoft Corp. This project is an **unofficial** integration developed by [@pajeronda](https://github.com/pajeronda) and is not affiliated with, sponsored by, or endorsed by Microsoft Corp.
-

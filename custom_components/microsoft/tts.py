@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import re
 import time
+import asyncio
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any
 from xml.sax.saxutils import escape
+import xml.etree.ElementTree as ET
 
 import aiohttp
 
@@ -37,6 +39,8 @@ from .const import (
     CONF_STYLE,
     CONF_STYLE_DEGREE,
     CONF_ROLE,
+    CONF_ALLOW_RAW_SSML,
+    CONF_RAW_SSML,
     DEFAULT_OUTPUT_FORMAT,
     DOMAIN,
     VOICES_CACHE_TTL,
@@ -59,6 +63,11 @@ SENTENCE_ENDINGS = re.compile(
     r"(?:[\s\u3000]+|(?=[\u3000-\u303F\u4E00-\u9FFF\uAC00-\uD7AF])|$)"
     # Followed by: space(s) OR CJK character OR end of string
 )
+
+STREAM_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+STREAM_MAX_RETRIES = 1
+STREAM_RETRY_BACKOFF_SECONDS = 0.4
+STREAM_FORCE_FLUSH_CHARS = 280
 
 
 def _get_file_extension_from_format(output_format: str) -> str:
@@ -218,6 +227,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             langs = set()
             for v in self._voices_data:
                 locale = v["Locale"]
+                langs.add(locale)  # it-IT
                 langs.add(locale.lower())  # it-it
             return sorted(list(langs))
 
@@ -235,6 +245,7 @@ class AzureTTSEntity(TextToSpeechEntity):
             CONF_STYLE,
             CONF_STYLE_DEGREE,
             CONF_ROLE,
+            CONF_RAW_SSML,
         ]
 
     @property
@@ -326,12 +337,30 @@ class AzureTTSEntity(TextToSpeechEntity):
             "role": role,
         }
 
+    def _resolve_raw_ssml_enabled(self, options: dict[str, Any]) -> bool:
+        """Resolve raw SSML mode with per-call override."""
+        global_setting = self._config_entry.options.get(CONF_ALLOW_RAW_SSML, False)
+
+        if CONF_RAW_SSML not in options:
+            return bool(global_setting)
+
+        value = options.get(CONF_RAW_SSML)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return value != 0
+
+        return bool(global_setting)
+
     def _build_ssml(
         self,
         message: str,
         voice: str,
         language: str,
         prosody_options: dict[str, str],
+        allow_raw_ssml: bool = False,
     ) -> str:
         """Build SSML document for Azure TTS.
 
@@ -344,6 +373,12 @@ class AzureTTSEntity(TextToSpeechEntity):
         Returns:
             Complete SSML document as string
         """
+        stripped_message = message.strip()
+
+        # Raw SSML mode: if message is a full SSML document, use as-is.
+        if allow_raw_ssml and stripped_message.lower().startswith("<speak"):
+            return message
+
         xml_doc = (
             f"<speak version='1.0' xmlns:mstts='{SSML_NAMESPACE}' "
             f"xml:lang='{language}'>"
@@ -366,7 +401,10 @@ class AzureTTSEntity(TextToSpeechEntity):
             f"pitch='{prosody_options['pitch']}' "
             f"volume='{prosody_options['volume']}'>"
         )
-        xml_doc += escape(message).replace('"', "&quot;")
+        if allow_raw_ssml:
+            xml_doc += message
+        else:
+            xml_doc += escape(message).replace('"', "&quot;")
         xml_doc += "</prosody>"
 
         if style:
@@ -375,6 +413,44 @@ class AzureTTSEntity(TextToSpeechEntity):
         xml_doc += "</voice></speak>"
 
         return xml_doc
+
+    def _build_validated_ssml(
+        self,
+        message: str,
+        voice: str,
+        language: str,
+        prosody_options: dict[str, str],
+        allow_raw_ssml: bool,
+    ) -> str:
+        """Build SSML and validate XML when raw SSML mode is enabled.
+
+        Falls back to escaped text when raw SSML is invalid.
+        """
+        ssml = self._build_ssml(
+            message=message,
+            voice=voice,
+            language=language,
+            prosody_options=prosody_options,
+            allow_raw_ssml=allow_raw_ssml,
+        )
+
+        if not allow_raw_ssml:
+            return ssml
+
+        try:
+            ET.fromstring(ssml)
+            return ssml
+        except ET.ParseError as ex:
+            _LOGGER.warning(
+                "Invalid raw SSML received, falling back to escaped text: %s", ex
+            )
+            return self._build_ssml(
+                message=message,
+                voice=voice,
+                language=language,
+                prosody_options=prosody_options,
+                allow_raw_ssml=False,
+            )
 
     @callback
     def async_get_supported_voices(self, language: str) -> list[Voice] | None:
@@ -413,9 +489,12 @@ class AzureTTSEntity(TextToSpeechEntity):
 
         # Normalize prosody options using helper
         prosody_options = self._normalize_prosody_options(options)
+        allow_raw_ssml = self._resolve_raw_ssml_enabled(options)
 
         # Build SSML using helper
-        xml_doc = self._build_ssml(message, voice, lang_to_use, prosody_options)
+        xml_doc = self._build_validated_ssml(
+            message, voice, lang_to_use, prosody_options, allow_raw_ssml
+        )
 
         # Prepare request headers
         headers = {
@@ -470,6 +549,7 @@ class AzureTTSEntity(TextToSpeechEntity):
 
         # Normalize prosody options once for all sentences
         prosody_options = self._normalize_prosody_options(options)
+        allow_raw_ssml = self._resolve_raw_ssml_enabled(options)
 
         # Prepare request headers (reused for all requests)
         headers = {
@@ -481,13 +561,86 @@ class AzureTTSEntity(TextToSpeechEntity):
 
         url = AZURE_TTS_BASE_URL.format(region=self._region)
 
+        async def stream_sentence_audio(sentence: str) -> AsyncGenerator[bytes]:
+            """Synthesize one sentence and yield audio chunks with basic retry."""
+            ssml = self._build_validated_ssml(
+                sentence, voice, lang_to_use, prosody_options, allow_raw_ssml
+            )
+
+            for attempt in range(STREAM_MAX_RETRIES + 1):
+                try:
+                    async with self._session.post(
+                        url, headers=headers, data=ssml.encode("utf-8")
+                    ) as response:
+                        if response.status == 200:
+                            async for audio_chunk in response.content.iter_chunked(
+                                AUDIO_CHUNK_SIZE
+                            ):
+                                yield audio_chunk
+                            return
+
+                        error_text = await response.text()
+                        if (
+                            response.status in STREAM_RETRYABLE_STATUS
+                            and attempt < STREAM_MAX_RETRIES
+                        ):
+                            _LOGGER.warning(
+                                "Retrying Azure TTS sentence after HTTP %d (attempt %d/%d)",
+                                response.status,
+                                attempt + 2,
+                                STREAM_MAX_RETRIES + 1,
+                            )
+                            await asyncio.sleep(
+                                STREAM_RETRY_BACKOFF_SECONDS * (attempt + 1)
+                            )
+                            continue
+
+                        _LOGGER.error(
+                            "Error %d from Azure TTS for sentence '%s...': %s",
+                            response.status,
+                            sentence[:50],
+                            error_text,
+                        )
+                        return
+
+                except aiohttp.ClientError as ex:
+                    if attempt < STREAM_MAX_RETRIES:
+                        _LOGGER.warning(
+                            "Network error while streaming sentence, retrying (attempt %d/%d): %s",
+                            attempt + 2,
+                            STREAM_MAX_RETRIES + 1,
+                            ex,
+                        )
+                        await asyncio.sleep(
+                            STREAM_RETRY_BACKOFF_SECONDS * (attempt + 1)
+                        )
+                        continue
+
+                    _LOGGER.error(
+                        "Error streaming Azure TTS for sentence '%s...': %s",
+                        sentence[:50],
+                        ex,
+                    )
+                    return
+
         async def data_gen() -> AsyncGenerator[bytes]:
             """Generate audio chunks sentence-by-sentence."""
             sentence_buffer = ""
 
             try:
+                message_gen = getattr(request, "message_gen", None)
+                if message_gen is None:
+                    full_message = getattr(request, "message", "").strip()
+                    if full_message:
+                        async for audio_chunk in stream_sentence_audio(full_message):
+                            yield audio_chunk
+                    return
+
                 # Process incoming text chunks from LLM
-                async for text_chunk in request.message_gen:
+                async for text_chunk in message_gen:
+                    if not text_chunk:
+                        continue
+
                     sentence_buffer += text_chunk
 
                     # Check for sentence boundaries
@@ -501,71 +654,26 @@ class AzureTTSEntity(TextToSpeechEntity):
                         if not sentence:
                             continue
 
-                        # Generate SSML for this sentence
-                        ssml = self._build_ssml(
-                            sentence, voice, lang_to_use, prosody_options
-                        )
+                        async for audio_chunk in stream_sentence_audio(sentence):
+                            yield audio_chunk
 
-                        # Synthesize and stream audio for this sentence
-                        try:
-                            async with self._session.post(
-                                url, headers=headers, data=ssml.encode("utf-8")
-                            ) as response:
-                                if response.status != 200:
-                                    error_text = await response.text()
-                                    _LOGGER.error(
-                                        "Error %d from Azure TTS for sentence '%s...': %s",
-                                        response.status,
-                                        sentence[:50],
-                                        error_text,
-                                    )
-                                    continue
+                    # Force flush for very long text with no sentence-ending punctuation.
+                    if len(sentence_buffer) >= STREAM_FORCE_FLUSH_CHARS:
+                        split_idx = sentence_buffer.rfind(" ", 0, STREAM_FORCE_FLUSH_CHARS)
+                        if split_idx <= 0:
+                            split_idx = STREAM_FORCE_FLUSH_CHARS
 
-                                # Stream audio chunks as they arrive
-                                async for audio_chunk in response.content.iter_chunked(
-                                    AUDIO_CHUNK_SIZE
-                                ):
-                                    yield audio_chunk
-
-                        except aiohttp.ClientError as ex:
-                            _LOGGER.error(
-                                "Error streaming Azure TTS for sentence '%s...': %s",
-                                sentence[:50],
-                                ex,
-                            )
-                            continue
+                        partial_sentence = sentence_buffer[:split_idx].strip()
+                        sentence_buffer = sentence_buffer[split_idx:]
+                        if partial_sentence:
+                            async for audio_chunk in stream_sentence_audio(partial_sentence):
+                                yield audio_chunk
 
                 # Process any remaining text (last sentence without punctuation)
                 remaining_text = sentence_buffer.strip()
                 if remaining_text:
-                    ssml = self._build_ssml(
-                        remaining_text, voice, lang_to_use, prosody_options
-                    )
-
-                    try:
-                        async with self._session.post(
-                            url, headers=headers, data=ssml.encode("utf-8")
-                        ) as response:
-                            if response.status == 200:
-                                async for audio_chunk in response.content.iter_chunked(
-                                    AUDIO_CHUNK_SIZE
-                                ):
-                                    yield audio_chunk
-                            else:
-                                error_text = await response.text()
-                                _LOGGER.error(
-                                    "Error %d from Azure TTS for final text '%s...': %s",
-                                    response.status,
-                                    remaining_text[:50],
-                                    error_text,
-                                )
-
-                    except aiohttp.ClientError as ex:
-                        _LOGGER.error(
-                            "Error streaming Azure TTS for final text '%s...': %s",
-                            remaining_text[:50],
-                            ex,
-                        )
+                    async for audio_chunk in stream_sentence_audio(remaining_text):
+                        yield audio_chunk
 
             except Exception as ex:
                 _LOGGER.error("Unexpected error in streaming TTS: %s", ex)
