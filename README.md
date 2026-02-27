@@ -5,6 +5,19 @@ This custom component replaces the official Microsoft TTS integration for Home A
 
 <img width="100%" height="auto" alt="immagine" src="https://github.com/user-attachments/assets/b729f04c-c8f9-49b7-8fcc-711fd9be0972" />
 
+## SSML Support
+
+This integration provides **advanced SSML support** for Azure TTS, including multi-voice scenarios and streaming-safe handling.
+
+- Full `<speak>` documents are supported in raw mode (`raw_ssml: true`)
+- Common SSML tags are handled robustly: `<voice>`, `<break>`, `<p>`, `<s>`, `<phoneme>`, `<sub>`
+- Automatic light sanitization is applied for common malformed input cases
+- If SSML is invalid, fallback logic prevents reading XML tags out loud
+
+**Is it "full SSML"?**  
+Not a full implementation of every possible SSML feature/edge case from the entire W3C spec.  
+It is full for the main Azure TTS usage patterns and the most common Home Assistant automation scenarios.
+
 
 ## Installation
 

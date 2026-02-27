@@ -693,6 +693,39 @@ class AzureTTSEntity(TextToSpeechEntity):
             if saw_speak_open:
                 async for audio_chunk in flush_complete_ssml_units():
                     yield audio_chunk
+                continue
+
+            # Raw SSML enabled but no <speak> detected yet: keep plain text streaming.
+            # If markup appears ("<"), stop sentence-splitting and wait for more context.
+            if "<" in ssml_buffer:
+                continue
+
+            while match := SENTENCE_ENDINGS.search(ssml_buffer):
+                sentence_end = match.end()
+                sentence = ssml_buffer[:sentence_end].strip()
+                ssml_buffer = ssml_buffer[sentence_end:]
+                if not sentence:
+                    continue
+                async for audio_chunk in self._stream_sentence_audio(
+                    sentence, voice, language, prosody_options, allow_raw_ssml
+                ):
+                    yield audio_chunk
+
+            if len(ssml_buffer) >= STREAM_FORCE_FLUSH_CHARS:
+                split_idx = ssml_buffer.rfind(" ", 0, STREAM_FORCE_FLUSH_CHARS)
+                if split_idx <= 0:
+                    split_idx = STREAM_FORCE_FLUSH_CHARS
+                partial_sentence = ssml_buffer[:split_idx].strip()
+                ssml_buffer = ssml_buffer[split_idx:]
+                if partial_sentence:
+                    async for audio_chunk in self._stream_sentence_audio(
+                        partial_sentence,
+                        voice,
+                        language,
+                        prosody_options,
+                        allow_raw_ssml,
+                    ):
+                        yield audio_chunk
 
         if not saw_speak_open:
             plain_text = ssml_buffer.strip()
