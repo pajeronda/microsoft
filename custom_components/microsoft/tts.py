@@ -50,6 +50,14 @@ from .const import (
     SSML_NAMESPACE,
     AUDIO_CHUNK_SIZE,
 )
+from .ssml_utils import (
+    RAW_SSML_SPEAK_CLOSE_RE,
+    apply_default_prosody_to_raw_ssml,
+    extract_complete_top_level_ssml_units,
+    sanitize_raw_ssml_light,
+    ssml_to_plain_text,
+    wrap_raw_ssml_unit,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +76,7 @@ STREAM_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 STREAM_MAX_RETRIES = 1
 STREAM_RETRY_BACKOFF_SECONDS = 0.4
 STREAM_FORCE_FLUSH_CHARS = 280
+RAW_SSML_SPEAK_OPEN_RE = re.compile(r"<speak\b[^>]*>", re.IGNORECASE)
 
 
 def _get_file_extension_from_format(output_format: str) -> str:
@@ -104,7 +113,9 @@ def _get_file_extension_from_format(output_format: str) -> str:
         # Default fallback
         extension = "mp3"
 
-    _LOGGER.debug("Mapped output format '%s' to extension '%s'", output_format, extension)
+    _LOGGER.debug(
+        "Mapped output format '%s' to extension '%s'", output_format, extension
+    )
     return extension
 
 
@@ -122,6 +133,48 @@ async def async_setup_entry(
 
 class AzureTTSEntity(TextToSpeechEntity):
     """The Microsoft Text-to-Speech (TTS) API entity."""
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
+        """Convert common bool-like values to bool."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+            return default
+        if isinstance(value, (int, float)):
+            return value != 0
+        return default
+
+    def _is_raw_ssml_globally_enabled(self) -> bool:
+        """Return global raw SSML setting from options/data."""
+        raw_setting = self._config_entry.options.get(
+            CONF_ALLOW_RAW_SSML,
+            self._config_entry.data.get(CONF_ALLOW_RAW_SSML, False),
+        )
+        return self._coerce_bool(raw_setting, default=False)
+
+    def _build_request_headers(self) -> dict[str, str]:
+        """Build Azure TTS request headers."""
+        return {
+            "Ocp-Apim-Subscription-Key": self._apikey,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": self._output_format,
+            "User-Agent": "HomeAssistant-MicrosoftAzureTTS",
+        }
+
+    def _prepare_synthesis_context(
+        self, language: str, options: dict[str, Any]
+    ) -> tuple[str, str, dict[str, str], bool]:
+        """Resolve synthesis context shared by sync and streaming paths."""
+        voice, lang_to_use = self._resolve_voice_and_language(language, options)
+        prosody_options = self._normalize_prosody_options(options)
+        allow_raw_ssml = self._resolve_raw_ssml_enabled(options)
+        return voice, lang_to_use, prosody_options, allow_raw_ssml
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
         """Init Microsoft Text-to-Speech (TTS) service."""
@@ -141,7 +194,9 @@ class AzureTTSEntity(TextToSpeechEntity):
             CONF_OUTPUT_FORMAT,
             config_entry.data.get(CONF_OUTPUT_FORMAT, DEFAULT_OUTPUT_FORMAT),
         )
-        _LOGGER.debug("Initialized TTS entity with output format: %s", self._output_format)
+        _LOGGER.debug(
+            "Initialized TTS entity with output format: %s", self._output_format
+        )
 
         self._session = async_get_clientsession(hass)
         self._voices_data = []
@@ -253,6 +308,7 @@ class AzureTTSEntity(TextToSpeechEntity):
         """Return a mapping with the default options."""
         return {
             ATTR_VOICE: self._default_voice,
+            CONF_RAW_SSML: self._is_raw_ssml_globally_enabled(),
         }
 
     def _resolve_voice_and_language(
@@ -338,21 +394,16 @@ class AzureTTSEntity(TextToSpeechEntity):
         }
 
     def _resolve_raw_ssml_enabled(self, options: dict[str, Any]) -> bool:
-        """Resolve raw SSML mode with per-call override."""
-        global_setting = self._config_entry.options.get(CONF_ALLOW_RAW_SSML, False)
+        """Resolve raw SSML mode with per-call override.
+
+        Precedence: per-call option > global setting.
+        """
+        global_setting = self._is_raw_ssml_globally_enabled()
 
         if CONF_RAW_SSML not in options:
-            return bool(global_setting)
+            return global_setting
 
-        value = options.get(CONF_RAW_SSML)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        if isinstance(value, (int, float)):
-            return value != 0
-
-        return bool(global_setting)
+        return self._coerce_bool(options.get(CONF_RAW_SSML), default=global_setting)
 
     def _build_ssml(
         self,
@@ -377,7 +428,7 @@ class AzureTTSEntity(TextToSpeechEntity):
 
         # Raw SSML mode: if message is a full SSML document, use as-is.
         if allow_raw_ssml and stripped_message.lower().startswith("<speak"):
-            return message
+            return apply_default_prosody_to_raw_ssml(stripped_message, prosody_options)
 
         xml_doc = (
             f"<speak version='1.0' xmlns:mstts='{SSML_NAMESPACE}' "
@@ -401,8 +452,16 @@ class AzureTTSEntity(TextToSpeechEntity):
             f"pitch='{prosody_options['pitch']}' "
             f"volume='{prosody_options['volume']}'>"
         )
+        # In raw mode, only inject unescaped content when it looks like an SSML fragment.
+        # Plain text must still be escaped to avoid XML parsing issues.
         if allow_raw_ssml:
-            xml_doc += message
+            looks_like_ssml_fragment = stripped_message.startswith(
+                "<"
+            ) and stripped_message.endswith(">")
+            if looks_like_ssml_fragment:
+                xml_doc += message
+            else:
+                xml_doc += escape(message).replace('"', "&quot;")
         else:
             xml_doc += escape(message).replace('"', "&quot;")
         xml_doc += "</prosody>"
@@ -426,15 +485,20 @@ class AzureTTSEntity(TextToSpeechEntity):
 
         Falls back to escaped text when raw SSML is invalid.
         """
+        # Safety net: when input is already a full SSML document, treat it as raw.
+        # This avoids speaking XML tags if global/per-call raw flags are not propagated.
+        force_raw_from_message = message.strip().lower().startswith("<speak")
+        effective_raw_ssml = allow_raw_ssml or force_raw_from_message
+
         ssml = self._build_ssml(
             message=message,
             voice=voice,
             language=language,
             prosody_options=prosody_options,
-            allow_raw_ssml=allow_raw_ssml,
+            allow_raw_ssml=effective_raw_ssml,
         )
 
-        if not allow_raw_ssml:
+        if not effective_raw_ssml:
             return ssml
 
         try:
@@ -442,10 +506,39 @@ class AzureTTSEntity(TextToSpeechEntity):
             return ssml
         except ET.ParseError as ex:
             _LOGGER.warning(
-                "Invalid raw SSML received, falling back to escaped text: %s", ex
+                "Invalid raw SSML received, attempting light repair: %s", ex
+            )
+            # Try a non-destructive SSML repair pass before falling back.
+            repaired_message = sanitize_raw_ssml_light(message)
+            repaired_ssml = self._build_ssml(
+                message=repaired_message,
+                voice=voice,
+                language=language,
+                prosody_options=prosody_options,
+                allow_raw_ssml=effective_raw_ssml,
+            )
+            try:
+                ET.fromstring(repaired_ssml)
+                return repaired_ssml
+            except ET.ParseError as repair_ex:
+                _LOGGER.warning(
+                    "Invalid raw SSML after light repair, falling back to escaped text: %s",
+                    repair_ex,
+                )
+
+            is_raw_like_markup = message.strip().startswith("<")
+            _LOGGER.warning(
+                "Falling back to plain text synthesis for malformed raw SSML."
+            )
+            # If raw SSML is malformed, avoid speaking XML tags out loud:
+            # convert markup to plain text before normal synthesis.
+            fallback_message = (
+                ssml_to_plain_text(repaired_message)
+                if force_raw_from_message or is_raw_like_markup
+                else message
             )
             return self._build_ssml(
-                message=message,
+                message=fallback_message,
                 voice=voice,
                 language=language,
                 prosody_options=prosody_options,
@@ -477,6 +570,207 @@ class AzureTTSEntity(TextToSpeechEntity):
         voices.sort(key=lambda x: x.name)
         return voices
 
+    async def _async_synthesize_audio_bytes(
+        self,
+        ssml: str,
+        retries: int,
+        error_context: str,
+    ) -> bytes | None:
+        """Send SSML to Azure and return full audio bytes with retry policy."""
+        headers = self._build_request_headers()
+        url = AZURE_TTS_BASE_URL.format(region=self._region)
+
+        for attempt in range(retries + 1):
+            try:
+                async with self._session.post(
+                    url, headers=headers, data=ssml.encode("utf-8")
+                ) as response:
+                    if response.status == 200:
+                        return await response.read()
+
+                    error_text = await response.text()
+                    if response.status in STREAM_RETRYABLE_STATUS and attempt < retries:
+                        _LOGGER.warning(
+                            "Retrying Azure TTS after HTTP %d (attempt %d/%d) for %s",
+                            response.status,
+                            attempt + 2,
+                            retries + 1,
+                            error_context,
+                        )
+                        await asyncio.sleep(
+                            STREAM_RETRY_BACKOFF_SECONDS * (attempt + 1)
+                        )
+                        continue
+
+                    _LOGGER.error(
+                        "Error %d from Azure TTS (%s): %s",
+                        response.status,
+                        error_context,
+                        error_text,
+                    )
+                    return None
+            except aiohttp.ClientError as ex:
+                if attempt < retries:
+                    _LOGGER.warning(
+                        "Network error while calling Azure TTS, retrying (attempt %d/%d) for %s: %s",
+                        attempt + 2,
+                        retries + 1,
+                        error_context,
+                        ex,
+                    )
+                    await asyncio.sleep(STREAM_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+
+                _LOGGER.error(
+                    "Error occurred for Microsoft Azure TTS (%s): %s", error_context, ex
+                )
+                return None
+
+        return None
+
+    async def _stream_sentence_audio(
+        self,
+        sentence: str,
+        voice: str,
+        language: str,
+        prosody_options: dict[str, str],
+        allow_raw_ssml: bool,
+    ) -> AsyncGenerator[bytes]:
+        """Synthesize one sentence and yield audio chunks."""
+        ssml = self._build_validated_ssml(
+            sentence, voice, language, prosody_options, allow_raw_ssml
+        )
+        audio_bytes = await self._async_synthesize_audio_bytes(
+            ssml=ssml,
+            retries=STREAM_MAX_RETRIES,
+            error_context=f"sentence '{sentence[:50]}...'",
+        )
+        if not audio_bytes:
+            return
+
+        for idx in range(0, len(audio_bytes), AUDIO_CHUNK_SIZE):
+            yield audio_bytes[idx : idx + AUDIO_CHUNK_SIZE]
+
+    async def _stream_raw_ssml_message(
+        self,
+        message_gen: AsyncGenerator[str],
+        voice: str,
+        language: str,
+        prosody_options: dict[str, str],
+        allow_raw_ssml: bool,
+    ) -> AsyncGenerator[bytes]:
+        """Stream raw SSML content preserving XML unit boundaries."""
+        ssml_buffer = ""
+        saw_speak_open = False
+
+        async def flush_complete_ssml_units() -> AsyncGenerator[bytes]:
+            nonlocal ssml_buffer
+            units, remainder, _ = extract_complete_top_level_ssml_units(ssml_buffer)
+            ssml_buffer = remainder
+
+            for unit in units:
+                if not unit:
+                    continue
+                sentence = (
+                    wrap_raw_ssml_unit(unit, language) if unit.startswith("<") else unit
+                )
+                async for audio_chunk in self._stream_sentence_audio(
+                    sentence, voice, language, prosody_options, allow_raw_ssml
+                ):
+                    yield audio_chunk
+
+        async for text_chunk in message_gen:
+            if not text_chunk:
+                continue
+            ssml_buffer += text_chunk
+
+            if not saw_speak_open and RAW_SSML_SPEAK_OPEN_RE.search(ssml_buffer):
+                saw_speak_open = True
+                open_match = RAW_SSML_SPEAK_OPEN_RE.search(ssml_buffer)
+                if open_match:
+                    ssml_buffer = ssml_buffer[open_match.end() :]
+
+            if saw_speak_open:
+                async for audio_chunk in flush_complete_ssml_units():
+                    yield audio_chunk
+
+        if not saw_speak_open:
+            plain_text = ssml_buffer.strip()
+            if plain_text:
+                async for audio_chunk in self._stream_sentence_audio(
+                    plain_text, voice, language, prosody_options, allow_raw_ssml
+                ):
+                    yield audio_chunk
+            return
+
+        async for audio_chunk in flush_complete_ssml_units():
+            yield audio_chunk
+
+        trailing_content = RAW_SSML_SPEAK_CLOSE_RE.sub("", ssml_buffer).strip()
+        if not trailing_content:
+            return
+
+        sentence = (
+            wrap_raw_ssml_unit(trailing_content, language)
+            if trailing_content.startswith("<")
+            else trailing_content
+        )
+        async for audio_chunk in self._stream_sentence_audio(
+            sentence, voice, language, prosody_options, allow_raw_ssml
+        ):
+            yield audio_chunk
+
+    async def _stream_text_message(
+        self,
+        message_gen: AsyncGenerator[str],
+        voice: str,
+        language: str,
+        prosody_options: dict[str, str],
+        allow_raw_ssml: bool,
+    ) -> AsyncGenerator[bytes]:
+        """Stream plain text content using sentence segmentation."""
+        sentence_buffer = ""
+
+        async for text_chunk in message_gen:
+            if not text_chunk:
+                continue
+
+            sentence_buffer += text_chunk
+
+            while match := SENTENCE_ENDINGS.search(sentence_buffer):
+                sentence_end = match.end()
+                sentence = sentence_buffer[:sentence_end].strip()
+                sentence_buffer = sentence_buffer[sentence_end:]
+                if not sentence:
+                    continue
+                async for audio_chunk in self._stream_sentence_audio(
+                    sentence, voice, language, prosody_options, allow_raw_ssml
+                ):
+                    yield audio_chunk
+
+            if len(sentence_buffer) >= STREAM_FORCE_FLUSH_CHARS:
+                split_idx = sentence_buffer.rfind(" ", 0, STREAM_FORCE_FLUSH_CHARS)
+                if split_idx <= 0:
+                    split_idx = STREAM_FORCE_FLUSH_CHARS
+                partial_sentence = sentence_buffer[:split_idx].strip()
+                sentence_buffer = sentence_buffer[split_idx:]
+                if partial_sentence:
+                    async for audio_chunk in self._stream_sentence_audio(
+                        partial_sentence,
+                        voice,
+                        language,
+                        prosody_options,
+                        allow_raw_ssml,
+                    ):
+                        yield audio_chunk
+
+        remaining_text = sentence_buffer.strip()
+        if remaining_text:
+            async for audio_chunk in self._stream_sentence_audio(
+                remaining_text, voice, language, prosody_options, allow_raw_ssml
+            ):
+                yield audio_chunk
+
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict | None = None
     ) -> TtsAudioType:
@@ -484,43 +778,19 @@ class AzureTTSEntity(TextToSpeechEntity):
         if options is None:
             options = {}
 
-        # Resolve voice and language using helper
-        voice, lang_to_use = self._resolve_voice_and_language(language, options)
+        voice, lang_to_use, prosody_options, allow_raw_ssml = (
+            self._prepare_synthesis_context(language, options)
+        )
 
-        # Normalize prosody options using helper
-        prosody_options = self._normalize_prosody_options(options)
-        allow_raw_ssml = self._resolve_raw_ssml_enabled(options)
-
-        # Build SSML using helper
         xml_doc = self._build_validated_ssml(
             message, voice, lang_to_use, prosody_options, allow_raw_ssml
         )
-
-        # Prepare request headers
-        headers = {
-            "Ocp-Apim-Subscription-Key": self._apikey,
-            "Content-Type": "application/ssml+xml",
-            "X-Microsoft-OutputFormat": self._output_format,
-            "User-Agent": "HomeAssistant-MicrosoftAzureTTS",
-        }
-
-        url = AZURE_TTS_BASE_URL.format(region=self._region)
-
-        try:
-            async with self._session.post(
-                url, headers=headers, data=xml_doc.encode("utf-8")
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    _LOGGER.error(
-                        "Error %d from Azure TTS: %s", response.status, error_text
-                    )
-                    return None, None
-
-                data = await response.read()
-
-        except aiohttp.ClientError as ex:
-            _LOGGER.error("Error occurred for Microsoft Azure TTS: %s", ex)
+        data = await self._async_synthesize_audio_bytes(
+            ssml=xml_doc,
+            retries=0,
+            error_context="legacy request",
+        )
+        if data is None:
             return None, None
 
         file_extension = _get_file_extension_from_format(self._output_format)
@@ -529,152 +799,47 @@ class AzureTTSEntity(TextToSpeechEntity):
     async def async_stream_tts_audio(
         self, request: TTSAudioRequest
     ) -> TTSAudioResponse:
-        """Stream TTS audio from Azure using sentence-by-sentence synthesis.
-
-        This method provides reduced latency by:
-        1. Accumulating text chunks until a sentence boundary is detected
-        2. Synthesizing each complete sentence independently
-        3. Streaming audio chunks as they arrive from Azure
-
-        Supports multi-language sentence detection including:
-        - Latin scripts (.!?)
-        - CJK languages (。！？)
-        - Arabic (؟۔)
-        - Indic scripts (।॥)
-        """
+        """Stream TTS audio from Azure using sentence-by-sentence synthesis."""
         options = request.options or {}
-
-        # Resolve voice and language once for all sentences
-        voice, lang_to_use = self._resolve_voice_and_language(request.language, options)
-
-        # Normalize prosody options once for all sentences
-        prosody_options = self._normalize_prosody_options(options)
-        allow_raw_ssml = self._resolve_raw_ssml_enabled(options)
-
-        # Prepare request headers (reused for all requests)
-        headers = {
-            "Ocp-Apim-Subscription-Key": self._apikey,
-            "Content-Type": "application/ssml+xml",
-            "X-Microsoft-OutputFormat": self._output_format,
-            "User-Agent": "HomeAssistant-MicrosoftAzureTTS",
-        }
-
-        url = AZURE_TTS_BASE_URL.format(region=self._region)
-
-        async def stream_sentence_audio(sentence: str) -> AsyncGenerator[bytes]:
-            """Synthesize one sentence and yield audio chunks with basic retry."""
-            ssml = self._build_validated_ssml(
-                sentence, voice, lang_to_use, prosody_options, allow_raw_ssml
-            )
-
-            for attempt in range(STREAM_MAX_RETRIES + 1):
-                try:
-                    async with self._session.post(
-                        url, headers=headers, data=ssml.encode("utf-8")
-                    ) as response:
-                        if response.status == 200:
-                            async for audio_chunk in response.content.iter_chunked(
-                                AUDIO_CHUNK_SIZE
-                            ):
-                                yield audio_chunk
-                            return
-
-                        error_text = await response.text()
-                        if (
-                            response.status in STREAM_RETRYABLE_STATUS
-                            and attempt < STREAM_MAX_RETRIES
-                        ):
-                            _LOGGER.warning(
-                                "Retrying Azure TTS sentence after HTTP %d (attempt %d/%d)",
-                                response.status,
-                                attempt + 2,
-                                STREAM_MAX_RETRIES + 1,
-                            )
-                            await asyncio.sleep(
-                                STREAM_RETRY_BACKOFF_SECONDS * (attempt + 1)
-                            )
-                            continue
-
-                        _LOGGER.error(
-                            "Error %d from Azure TTS for sentence '%s...': %s",
-                            response.status,
-                            sentence[:50],
-                            error_text,
-                        )
-                        return
-
-                except aiohttp.ClientError as ex:
-                    if attempt < STREAM_MAX_RETRIES:
-                        _LOGGER.warning(
-                            "Network error while streaming sentence, retrying (attempt %d/%d): %s",
-                            attempt + 2,
-                            STREAM_MAX_RETRIES + 1,
-                            ex,
-                        )
-                        await asyncio.sleep(
-                            STREAM_RETRY_BACKOFF_SECONDS * (attempt + 1)
-                        )
-                        continue
-
-                    _LOGGER.error(
-                        "Error streaming Azure TTS for sentence '%s...': %s",
-                        sentence[:50],
-                        ex,
-                    )
-                    return
+        voice, lang_to_use, prosody_options, allow_raw_ssml = (
+            self._prepare_synthesis_context(request.language, options)
+        )
 
         async def data_gen() -> AsyncGenerator[bytes]:
-            """Generate audio chunks sentence-by-sentence."""
-            sentence_buffer = ""
-
             try:
                 message_gen = getattr(request, "message_gen", None)
                 if message_gen is None:
                     full_message = getattr(request, "message", "").strip()
                     if full_message:
-                        async for audio_chunk in stream_sentence_audio(full_message):
+                        async for audio_chunk in self._stream_sentence_audio(
+                            full_message,
+                            voice,
+                            lang_to_use,
+                            prosody_options,
+                            allow_raw_ssml,
+                        ):
                             yield audio_chunk
                     return
 
-                # Process incoming text chunks from LLM
-                async for text_chunk in message_gen:
-                    if not text_chunk:
-                        continue
-
-                    sentence_buffer += text_chunk
-
-                    # Check for sentence boundaries
-                    while match := SENTENCE_ENDINGS.search(sentence_buffer):
-                        # Extract complete sentence (including punctuation)
-                        sentence_end = match.end()
-                        sentence = sentence_buffer[:sentence_end].strip()
-                        sentence_buffer = sentence_buffer[sentence_end:]
-
-                        # Skip empty sentences
-                        if not sentence:
-                            continue
-
-                        async for audio_chunk in stream_sentence_audio(sentence):
-                            yield audio_chunk
-
-                    # Force flush for very long text with no sentence-ending punctuation.
-                    if len(sentence_buffer) >= STREAM_FORCE_FLUSH_CHARS:
-                        split_idx = sentence_buffer.rfind(" ", 0, STREAM_FORCE_FLUSH_CHARS)
-                        if split_idx <= 0:
-                            split_idx = STREAM_FORCE_FLUSH_CHARS
-
-                        partial_sentence = sentence_buffer[:split_idx].strip()
-                        sentence_buffer = sentence_buffer[split_idx:]
-                        if partial_sentence:
-                            async for audio_chunk in stream_sentence_audio(partial_sentence):
-                                yield audio_chunk
-
-                # Process any remaining text (last sentence without punctuation)
-                remaining_text = sentence_buffer.strip()
-                if remaining_text:
-                    async for audio_chunk in stream_sentence_audio(remaining_text):
+                if allow_raw_ssml:
+                    async for audio_chunk in self._stream_raw_ssml_message(
+                        message_gen,
+                        voice,
+                        lang_to_use,
+                        prosody_options,
+                        allow_raw_ssml,
+                    ):
                         yield audio_chunk
+                    return
 
+                async for audio_chunk in self._stream_text_message(
+                    message_gen,
+                    voice,
+                    lang_to_use,
+                    prosody_options,
+                    allow_raw_ssml,
+                ):
+                    yield audio_chunk
             except Exception as ex:
                 _LOGGER.error("Unexpected error in streaming TTS: %s", ex)
                 raise
