@@ -60,6 +60,7 @@ config/
 │       ├── const.py
 │       ├── manifest.json
 │       └── tts.py
+│       └── ssml_utils.py
 └── configuration.yaml
 ```
 
@@ -122,7 +123,7 @@ Integration based on:
 
 ## License
 
-This project is released under the MIT License. See [LICENSE](LICENSE) for details.
+This project is released under the GPL-3.0 License. See [LICENSE](LICENSE) for details.
 
 ---
 
